@@ -1,0 +1,47 @@
+---
+output: github_document
+---
+
+<!-- README.md is generated from README.Rmd. Please edit that file -->
+
+```{r, echo = FALSE}
+knitr::opts_chunk$set(
+  collapse = TRUE,
+  comment = "#>",
+  fig.path = "README-"
+)
+```
+
+# vmapp2017
+
+Data package for "Voluntary action alters the perception of visual illusions", published in Attention, Perception & Psychophysics (Vuorre & Metcalfe, 2017).
+
+The data can be downloaded as .csv files from the `data-raw` folder. It can also be installed as an R package directly from R:
+
+```{r}
+# install.packages("devtools")  # Install this package if needed
+devtools::install_github("mvuorre/vmapp2017")
+library(vmapp2017)
+```
+
+Once the `vmapp2017` is loaded into the workspace, you can directly access the visual illusion data in the `illusion` variable.
+
+```{r}
+head(illusion)
+```
+
+The interval estimation data (Experiment 1b) is in an object called `ie`
+
+```{r}
+head(ie)
+```
+
+The data files are described on their R help pages, or in "Reference", on top of this page.
+
+The data analysis is fully described in "Articles -> Data Analysis" on top of this page.
+
+Citation:
+
+```{r}
+citation("vmapp2017")
+```

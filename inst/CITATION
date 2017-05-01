@@ -1,0 +1,17 @@
+
+bibentry(bibtype = "Article",
+  title = "Voluntary action alters the perception of visual illusions",
+  url = "https://link.springer.com/article/10.3758/s13414-017-1321-x",
+  doi = "10.3758/s13414-017-1321-x",
+  journaltitle = "Attention, Perception, & Psychophysics",
+  journal = "Attention, Perception, & Psychophysics",
+  shortjournal = "Atten Percept Psychophys",
+  author = c(person("Matti", "Vuorre"), person("Janet", "Metcalfe")),
+  date = "2017-04-27",
+  year = "2017",
+  header = "To cite package vmapp2017 in publications, please use:",
+  textVersion  =
+    paste("Vuorre, M. & Metcalfe, J., (2017).",
+          "Voluntary action alters the perception of visual illusions.",
+          "Attention, Perception, & Psychophysics")
+)

@@ -1,0 +1,900 @@
+---
+title: "Data Analysis for V&M (2017)"
+author: "Matti Vuorre"
+date: "`r Sys.Date()`"
+output: rmarkdown::html_vignette
+vignette: >
+  %\VignetteIndexEntry{Vignette Title}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+---
+
+```{r, results = "hide", message = F}
+library(knitr)
+library(gridExtra)
+library(lme4)
+library(tidyverse)
+library(brms)
+library(vmapp2017)
+knitr::opts_chunk$set(message = F)
+```
+
+# Functions and constants
+
+```{r}
+get_pse <- function(X, x, c, scale = 1) {
+    # Function to get PSEs 
+    # X = Matrix of posterior samples (or row of MLEs)
+    # x = condition (0 or 1)
+    # c = constant (what value ISI is centered on)
+    pse <- - ( (X[,1] + X[,3]*x) / (X[,2] + X[,4]*x) )
+    pse <- (scale * pse) + c
+    return(pse)
+}
+
+iters <- 17500
+warmups <- 5000
+color_vals = c("#e41a1c", "#377eb8")
+alphas <- .2
+
+# Estimated models are saved in a local file to save time
+load(file="../../../~$models.rda")
+```
+
+Use common plotting theme
+
+```{r}
+library(vmisc)
+theme_set(theme_pub())
+```
+
+# Data preparation
+
+The data is contained in this package. Here we collapse the illusion data to counts (models estimate faster with collapsed data)
+
+```{r}
+data(illusion)
+illusion <- illusion %>% 
+    group_by(exp, id, condition, cond, interval) %>% 
+    summarise(k = sum(response, na.rm=T),
+              n = n(),
+              exclude = unique(exclude)) %>% 
+    ungroup()
+```
+
+# Experiment 1
+
+## Apparent Motion
+
+```{r}
+( exp1 <- filter(illusion, exp == 1) )
+```
+
+```{r, echo=F}
+e1p1 <- exp1 %>% 
+    filter(exclude == FALSE) %>%
+    ggplot(aes(x=interval, y=k/n, col=condition)) +
+    scale_color_manual(values = color_vals) +
+    geom_line(size=.5) +
+    geom_point() +
+    scale_y_continuous(breaks=c(0, 0.5, 1),
+                       labels=c("0", ".5", "1")) +
+    labs(x="Inter-stimulus interval (ms)", y="Perceived motion") +
+    facet_wrap("id", nrow=4)
+e1p2 <- e1p1 %+% filter(exp1, exclude == TRUE)
+grid.arrange(
+    e1p1 + ggtitle("A)"),
+    e1p2 + ggtitle("B)") +
+        theme(axis.title = element_text(colour = "white"),
+              axis.text = element_text(colour = "white")),
+    widths = c(8, 2))
+```
+
+We reject the participants in B.
+
+```{r}
+exp1 <- filter(exp1, exclude == F)
+Cc <- mean(unique(exp1$interval))
+exp1$isic <- ( exp1$interval - Cc ) / 10
+```
+
+### GLMM MLE estimation
+
+```{r, eval = F}
+exp1mle <- glmer(k/n ~ isic*condition + (isic*condition|id),
+                 weights = n, family=binomial(link=logit), 
+                 data=exp1)
+```
+
+```{r}
+summary(exp1mle)
+```
+
+### GLMM Bayes estimation
+
+```{r}
+Priors <- c(
+    set_prior("normal(0, 100)", class = "b"),
+    set_prior("cauchy(0, 4)", class = "sd")
+)
+```
+
+```{r, message=F, eval = F}
+exp1b <- brm(k | trials(n) ~ isic*condition + (isic*condition|id),
+             family=binomial(link=logit), prior = Priors,
+             data=exp1, cores = 4, iter = iters, warmup = warmups)
+```
+
+```{r, echo=F}
+Pars <- parnames(exp1b)[1:4]
+print(exp1b$fit, pars = Pars, probs = c(0.025, 0.975))
+```
+
+```{r}
+# Posterior probability (one-sided p-value)
+mean(posterior_samples(exp1b, pars = "b_cond") > 0) * 100.0
+```
+
+Population level PSEs
+
+```{r, echo=F}
+post <- posterior_samples(exp1b, pars = "b")
+exp1pse <- tibble(
+    Involuntary = get_pse(post, 0, Cc, 10),
+    Voluntary = get_pse(post, 1, Cc, 10)) %>%
+    mutate(Difference = Voluntary - Involuntary) %>%
+    gather()
+exp1psesum <- group_by(exp1pse, key) %>%
+    summarise(m = mean(value),
+              lwr = quantile(value, probs=.025),
+              upr = quantile(value, probs=.975))
+exp1psesum
+group_by(exp1pse, key) %>%
+    summarize(pp = mean(value > 0))
+```
+
+### Plot results
+
+```{r, echo=F, message = F}
+e1p3 <- expand.grid(
+    isic = seq(min(exp1$isic), max(exp1$isic), length = 32),
+    n = 1,
+    condition = c("involuntary", "voluntary")) %>%
+    bind_cols(., fitted(exp1b, 
+                        newdata = ., 
+                        re_formula=NA, 
+                        scale = "response") %>%
+                  as_tibble()
+              ) %>%
+    mutate(interval = 10*isic + Cc) %>%
+    as_tibble() %>%
+    ggplot(aes(x=interval)) +
+    scale_color_manual(values = color_vals) +
+    scale_fill_manual(values = color_vals) +
+    geom_ribbon(aes(ymin=`2.5%ile`, 
+                    ymax=`97.5%ile`, 
+                    fill=factor(condition)),
+                alpha=alphas, col=NA) +
+    geom_line(aes(y=Estimate, col=factor(condition), lty=factor(condition)),
+              size=1.35) +
+    scale_x_continuous(expand = c(0, 0.001)) +
+    scale_y_continuous(breaks = c(0, .25, .5, .75, 1),
+                       labels = c("0", ".25", ".5", ".75", "1"),
+                       limits = c(0, 1), expand = c(0, 0.001)) +
+    labs(x="Inter-stimulus interval (ms)", 
+         y="Pr(motion)")
+```
+
+```{r, message=F}
+e1p4 <- ggplot(exp1psesum, aes(x=reorder(key, rev(m)), m)) +
+    geom_hline(yintercept = 0, lty=2) +
+    geom_point(size=2) +
+    geom_errorbar(aes(ymin=lwr, ymax=upr), width = .2, size=.5) +
+    scale_y_continuous("PSE (ms)", 
+                       breaks = c(-30, 0, 30, 60, 90, 120, 150),
+                       limits = c(-35, 155)) +
+    scale_x_discrete("Condition", 
+                     labels = c("Voluntary", "No action", "Difference"))
+```
+
+```{r, message=F, echo=F}
+e1p5 <- grid.arrange(
+    e1p3 + 
+        ggtitle("A)") +
+        theme(plot.margin = unit(c(3,2,3,3), "mm"),
+              title = element_text(vjust=-.2, hjust=-.1),
+              axis.title = element_text(vjust=0.5, hjust=.5)),
+    e1p4 + 
+        ggtitle("B)") +
+        theme(plot.margin = unit(c(3,3,3,2), "mm"),
+              title = element_text(vjust=-.2, hjust=-.15),
+              axis.title = element_text(hjust=.5)),
+    widths = c(.65, .35))
+```
+
+Throughout, we use red to refer to the passive observation condition, and blue to the voluntary action condition.
+
+```{r, echo=F}
+bind_cols(exp1, as_tibble(fitted(exp1b))) %>%
+    ggplot(aes(x=interval, y=k/n, fill=condition)) +
+    scale_color_manual(values = color_vals) +
+    geom_point(aes(col=condition)) +
+    geom_ribbon(aes(ymin=`2.5%ile`/n, ymax=`97.5%ile`/n), alpha = .3) +
+    geom_line(aes(y=Estimate/n, col=condition)) +
+    facet_wrap("id")
+```
+
+## Interval Estimation
+
+```{r}
+data(ie)
+ie$isic <- ( ie$interval - mean(unique(ie$interval)) ) / 10
+ie
+```
+
+### LMM MLE 
+
+```{r, eval = F}
+iemle <- lmerTest::lmer(estimate ~ isic*condition + (isic*condition|id),
+               data = ie)
+```
+
+```{r}
+summary(iemle)
+```
+
+### LMM Bayes
+
+```{r, message=F, eval = F}
+ieb <- brm(estimate ~ isic*condition + (isic*condition|id),
+           data=ie, cores = 4, iter = iters, warmup = warmups)
+```
+
+```{r, echo=F}
+print(ieb$fit, pars = Pars, probs = c(0.025, 0.975))
+```
+
+```{r}
+# Posterior probability (one-sided p-value)
+mean(posterior_samples(ieb, pars = "b_cond") < 0) * 100
+```
+
+### Plot results
+
+```{r, echo=F}
+e1bp5 <- expand.grid(
+    isic = sort(unique(ie$isic)),
+    condition = c("involuntary", "voluntary")) %>%
+    bind_cols(., fitted(ieb, 
+                        newdata = ., 
+                        re_formula=NA, 
+                        scale = "response") %>%
+                  as_tibble()
+              ) %>%
+    mutate(interval = 10*isic + mean(ie$interval)) %>%
+    as_tibble() %>%
+    ggplot(aes(x=interval)) +
+    scale_color_manual(values = color_vals) +
+    scale_fill_manual(values = color_vals) +
+    geom_ribbon(aes(ymin=`2.5%ile`, 
+                    ymax=`97.5%ile`, 
+                    fill=factor(condition)),
+                alpha=alphas, col=NA) +
+    geom_line(aes(y=Estimate, col=factor(condition), lty=factor(condition)),
+              size=1.35) +
+    scale_x_continuous(breaks = c(50, 150, 250, 350), expand = c(0.002, 0.002)) +
+    scale_y_continuous(limits = c(50, 450), expand = c(0, 0.001)) +
+    labs(x="Inter-stimulus interval (ms)", 
+         y="ISI estimate")
+```
+
+```{r}
+new_int <- sort(unique(ie$isic))
+iepost <- posterior_samples(ieb, pars=parnames(ieb)[1:4])
+diffdat <- expand.grid(intrcpt = 0,
+                      isic = 0,
+                      condition = 1,
+                      intrct = new_int)
+# create predictor matrix
+Xmat <- as.matrix(diffdat)
+# matrix for fitted values
+fitmat <- matrix(ncol=nrow(iepost), nrow=nrow(diffdat))
+# obtain predicted values for each row
+for (i in 1:nrow(iepost)) {
+    fitmat[,i] <- Xmat %*% as.matrix(iepost)[i,]
+}
+# get quantiles to plot
+diffdat$lower <- apply(fitmat, 1, quantile, prob=0.025)
+diffdat$med <- apply(fitmat, 1, quantile, prob=0.5)
+diffdat$upper <- apply(fitmat, 1, quantile, prob=0.975)
+diffdat$variable <- sort(unique(ie$isic))
+
+e1bp6 <- ggplot(diffdat, aes(x = variable, y=med)) +
+    geom_hline(yintercept = 0, lty=2) +
+    geom_point(size = 1.4) +
+    geom_errorbar(aes(ymin=lower, ymax=upper), width = 1.3, size=.3) +
+    scale_y_continuous("Difference (ms)", 
+                       breaks = c(20, 0, -20, -40, -60, -80),
+                       limits = c(-85, 25)) +
+    scale_x_continuous("ISI (ms)", 
+                     breaks = c(-15, -5, 5, 15),
+                     labels = c("50", "150", "250", "350"),
+                     limits = c(-18, 18))
+```
+
+```{r}
+e1bp7 <- grid.arrange(
+    e1bp5 + 
+        ggtitle("A)"),
+    e1bp6 + 
+        ggtitle("B)"),
+    widths = c(7, 3))
+```
+
+```{r, echo=F}
+group_by(ie, id, isic, interval, condition) %>%
+    summarize(estimate = mean(estimate)) %>%
+    bind_cols(., as_tibble(fitted(ieb, .))) %>%
+    ggplot(aes(x=interval, y=estimate, fill=condition)) +
+    scale_color_manual(values = color_vals) +
+    geom_point(aes(col=condition)) +
+    geom_ribbon(aes(ymin=`2.5%ile`, ymax=`97.5%ile`), alpha = .3) +
+    geom_line(aes(y=Estimate, col=condition)) +
+    facet_wrap("id")
+```
+
+# Experiment 2
+
+```{r}
+( exp2 <- filter(illusion, exp == 2) )
+```
+
+```{r, echo=F}
+e2p1 <- exp2 %>% 
+    filter(exclude == FALSE) %>%
+    ggplot(aes(x=interval, y=k/n, col=condition)) +
+    scale_color_manual(values = color_vals) +
+    geom_line(size=.5) +
+    geom_point() +
+    scale_y_continuous(breaks=c(0, 0.5, 1),
+                       labels=c("0", ".5", "1")) +
+    labs(x="Inter-stimulus interval (ms)", y="Perceived element motion") +
+    facet_wrap(~id, nrow=5)
+e2p2 <- e2p1 %+% filter(exp2, exclude == TRUE)
+grid.arrange(
+    e2p1 + ggtitle("A)"),
+    e2p2 + ggtitle("B)") +
+        theme(axis.title = element_text(colour = "white"),
+              axis.text = element_text(colour = "white"),
+              aspect.ratio = 1),
+    widths = c(8, 2))
+```
+
+We reject the participants in B.
+
+```{r}
+exp2 <- filter(exp2, exclude == F)
+Cc <- 50  # ISI to center on (around middle)
+exp2$isic <- ( exp2$interval - Cc ) / 10
+```
+
+### GLMM MLE estimation
+
+```{r, eval = F}
+exp2mle <- glmer(k/n ~ isic*condition + (isic*condition|id),
+                 weights=n, family=binomial(link=logit), 
+                 data=exp2)
+```
+
+```{r}
+summary(exp2mle)
+```
+
+### GLMM Bayes estimation
+
+```{r, eval = F}
+exp2b <- brm(k | trials(n) ~ isic*condition + (isic*condition|id),
+             family=binomial(link=logit), prior = Priors,
+             data=exp2, cores = 4, iter = iters, warmup = warmups)
+```
+
+```{r, echo=F}
+print(exp2b$fit, pars = Pars, probs = c(0.025, 0.975))
+```
+
+```{r}
+# Posterior probability (one-sided p-value)
+mean(posterior_samples(exp2b, pars = "b_cond") > 0) * 100
+```
+
+Population-level PSEs.
+
+```{r, echo=F}
+post <- posterior_samples(exp2b, pars = "b")
+exp2pse <- tibble(
+    Involuntary = get_pse(post, 0, Cc, 10),
+    Voluntary = get_pse(post, 1, Cc, 10)) %>%
+    mutate(Difference = Voluntary - Involuntary) %>%
+    gather()
+exp2psesum <- group_by(exp2pse, key) %>%
+    summarise(m = mean(value),
+              lwr = quantile(value, probs=.025),
+              upr = quantile(value, probs=.975))
+exp2psesum
+group_by(exp2pse, key) %>%
+    summarize(pp = mean(value > 0))
+```
+
+### Plot results
+
+```{r, message=F, echo=F}
+e2p3 <- expand.grid(
+    isic = seq(min(exp2$isic), max(exp2$isic), length = 32),
+    n = 1,
+    condition = c("involuntary", "voluntary")) %>%
+    bind_cols(., fitted(exp2b, 
+                        newdata = ., 
+                        re_formula=NA, 
+                        scale = "response") %>%
+                  as_tibble()
+              ) %>%
+    mutate(interval = 10*isic + Cc) %>%
+    as_tibble() %>%
+    ggplot(aes(x=interval)) +
+    scale_color_manual(values = color_vals) +
+    scale_fill_manual(values = color_vals) +
+    geom_ribbon(aes(ymin=`2.5%ile`, 
+                    ymax=`97.5%ile`, 
+                    fill=factor(condition)),
+                alpha=alphas, col=NA) +
+    geom_line(aes(y=Estimate, col=factor(condition), lty=factor(condition)),
+              size=1.35) +
+    scale_x_continuous(breaks = sort(unique(exp2$interval)),
+                       expand = c(0, 0.001)) +
+    scale_y_continuous(breaks = c(0, .25, .5, .75, 1),
+                       labels = c("0", ".25", ".5", ".75", "1"),
+                       limits = c(0, 1), expand = c(0, 0.001)) +
+    labs(x="Inter-stimulus interval (ms)", 
+         y="Pr(element motion)")
+```
+
+```{r, echo=F}
+e2p4 <- ggplot(exp2psesum, aes(x=reorder(key, rev(m)), m)) +
+    geom_hline(yintercept = 0, lty=2) +
+    geom_point(size=2) +
+    geom_errorbar(aes(ymin=lwr, ymax=upr), width = .2, size=.5) +
+    scale_y_continuous("PSE (ms)", 
+                       breaks = c(0, 15, 30, 45, 60),
+                       limits = c(-10, 70)) +
+    scale_x_discrete("Condition", 
+                     labels = c("Voluntary", "No action", "Difference"))
+```
+
+```{r, echo=F}
+e2p5 <- grid.arrange(
+    e2p3 + 
+        ggtitle("A)") +
+        theme(plot.margin = unit(c(3,2,3,3), "mm"),
+              title = element_text(vjust=-.2, hjust=-.1),
+              axis.title = element_text(vjust=0.5, hjust=.5)),
+    e2p4 + 
+        ggtitle("B)") +
+        theme(plot.margin = unit(c(3,3,3,2), "mm"),
+              title = element_text(vjust=-.2, hjust=-.15),
+              axis.title = element_text(hjust=.5)),
+    widths = c(.65, .35))
+```
+
+```{r, echo=F}
+bind_cols(exp2, as_tibble(fitted(exp2b))) %>%
+    ggplot(aes(x=interval, y=k/n, fill=condition)) +
+    scale_color_manual(values = color_vals) +
+    geom_point(aes(col=condition)) +
+    geom_ribbon(aes(ymin=`2.5%ile`/n, ymax=`97.5%ile`/n), alpha = .3) +
+    geom_line(aes(y=Estimate/n, col=condition)) +
+    facet_wrap("id")
+```
+
+# Experiment 3
+
+```{r}
+( exp3 <- filter(illusion, exp == 3) )
+```
+
+```{r, echo=F}
+e3p1 <- exp3 %>% 
+    filter(exclude == FALSE) %>%
+    ggplot(aes(x=interval, y=k/n, col=condition)) +
+    scale_color_manual(values = color_vals) +
+    geom_line(size=.5) +
+    geom_point() +
+    scale_y_continuous(breaks=c(0, 0.5, 1),
+                       labels=c("0", ".5", "1")) +
+    labs(x="Inter-stimulus interval (ms)", y="Perceived element motion") +
+    facet_wrap(~id, nrow=6)
+e3p2 <- e3p1 %+% filter(exp3, exclude == TRUE) + 
+    theme(aspect.ratio = 1)
+grid.arrange(
+    e3p1 + ggtitle("A)"),
+    e3p2 + ggtitle("B)") +
+        theme(axis.title = element_text(colour = "white"),
+              axis.text = element_text(colour = "white")),
+    widths = c(8, 2))
+```
+
+We reject the participants in B.
+
+```{r, echo=F}
+exp3 <- filter(exp3, exclude == F)
+exp3$isic <- ( exp3$interval - Cc ) / 10
+```
+
+### GLMM MLE estimation
+
+```{r, eval = F}
+exp3mle <- glmer(k/n ~ isic*condition + (isic*condition|id),
+                 weights = n, family=binomial(link=logit), 
+                 data=exp3)
+```
+
+```{r}
+summary(exp3mle)
+```
+
+### GLMM Bayes estimation
+
+```{r, eval = F}
+exp3b <- brm(k | trials(n) ~ isic*condition + (isic*condition|id),
+             family=binomial(link=logit), prior = Priors,
+             data=exp3, cores = 4, iter = iters, warmup = warmups)
+```
+
+```{r, echo=F}
+print(exp3b$fit, pars = Pars, probs = c(0.025, 0.975), digits=3)
+```
+
+```{r}
+# Posterior probability (one-sided p-value)
+mean(posterior_samples(exp3b, pars = "b_cond") > 0) * 100
+```
+
+```{r, echo=F}
+post <- posterior_samples(exp3b, pars = "b")
+exp3pse <- tibble(
+    Involuntary = get_pse(post, 0, Cc, 10),
+    Voluntary = get_pse(post, 1, Cc, 10)) %>%
+    mutate(Difference = Voluntary - Involuntary) %>%
+    gather()
+exp3psesum <- group_by(exp3pse, key) %>%
+    summarise(m = mean(value),
+              lwr = quantile(value, probs=.025),
+              upr = quantile(value, probs=.975))
+exp3psesum
+group_by(exp3pse, key) %>%
+    summarize(pp = mean(value > 0))
+```
+
+### Plot results
+
+```{r, message=F, echo=F}
+e3p3 <- expand.grid(
+    isic = seq(min(exp3$isic), max(exp3$isic), length = 32),
+    n = 1,
+    condition = c("involuntary", "voluntary")) %>%
+    bind_cols(., fitted(exp3b, 
+                        newdata = ., 
+                        re_formula=NA, 
+                        scale = "response") %>%
+                  as_tibble()
+              ) %>%
+    mutate(interval = 10*isic + Cc) %>%
+    as_tibble() %>%
+    ggplot(aes(x=interval)) +
+    scale_color_manual(values = color_vals) +
+    scale_fill_manual(values = color_vals) +
+    geom_ribbon(aes(ymin=`2.5%ile`, 
+                    ymax=`97.5%ile`, 
+                    fill=factor(condition)),
+                alpha=alphas, col=NA) +
+    geom_line(aes(y=Estimate, col=factor(condition), lty=factor(condition)),
+              size=1.35) +
+    scale_x_continuous(breaks = sort(unique(exp3$interval)),
+                       expand = c(0, 0.001)) +
+    scale_y_continuous(breaks = c(0, .25, .5, .75, 1),
+                       labels = c("0", ".25", ".5", ".75", "1"),
+                       limits = c(0, 1), expand = c(0, 0.001)) +
+    labs(x="Inter-stimulus interval (ms)", y="Pr(element motion)") 
+```
+
+```{r, echo=F}
+e3p4 <- ggplot(exp3psesum, aes(x=reorder(key, rev(m)), m)) +
+    geom_hline(yintercept = 0, lty=2) +
+    geom_point(size=2) +
+    geom_errorbar(aes(ymin=lwr, ymax=upr), width = .2, size=.5) +
+    scale_y_continuous("PSE (ms)", 
+                       breaks = c(0, 15, 30, 45, 60),
+                       limits = c(-10, 70)) +
+    scale_x_discrete("Condition", 
+                     labels = c("Voluntary", "No action", "Difference"))
+```
+
+```{r, echo=F}
+e3p5 <- grid.arrange(
+    e3p3 + 
+        ggtitle("A)") +
+        theme(plot.margin = unit(c(3,2,3,3), "mm"),
+              title = element_text(vjust=-.2, hjust=-.1),
+              axis.title = element_text(vjust=0.5, hjust=.5)),
+    e3p4 + 
+        ggtitle("B)") +
+        theme(plot.margin = unit(c(3,3,3,2), "mm"),
+              title = element_text(vjust=-.2, hjust=-.15),
+              axis.title = element_text(hjust=.5)),
+    widths = c(.65, .35))
+```
+
+
+```{r, echo=F}
+bind_cols(exp3, as_tibble(fitted(exp3b))) %>%
+    ggplot(aes(x=interval, y=k/n, fill=condition)) +
+    scale_color_manual(values = color_vals) +
+    geom_point(aes(col=condition)) +
+    geom_ribbon(aes(ymin=`2.5%ile`/n, ymax=`97.5%ile`/n), alpha = .3) +
+    geom_line(aes(y=Estimate/n, col=condition)) +
+    facet_wrap("id")
+```
+
+
+# Experiment 4
+
+```{r}
+( exp4 <- filter(illusion, exp == 4) )
+```
+
+```{r, echo=F}
+e4p1 <- exp4 %>% 
+    filter(exclude == FALSE) %>%
+    ggplot(aes(x=interval, y=k/n, col=condition)) +
+    scale_color_manual(values = color_vals) +
+    geom_line(size=.5) +
+    geom_point() +
+    scale_y_continuous(breaks=c(0, 0.5, 1),
+                       labels=c("0", ".5", "1")) +
+    labs(x="Inter-stimulus interval (ms)", y="Perceived element motion") +
+    facet_wrap(~id, nrow=6)
+e4p2 <- e4p1 %+% filter(exp4, exclude == TRUE) + 
+    theme(aspect.ratio = 1)
+grid.arrange(
+    e4p1 + ggtitle("A)"),
+    e4p2 + ggtitle("B)") +
+        theme(axis.title = element_text(colour = "white"),
+              axis.text = element_text(colour = "white")),
+    widths = c(8, 2))
+```
+
+We reject the participants in B.
+
+```{r, echo=F}
+exp4 <- filter(exp4, exclude == F)
+exp4$isic <- ( exp4$interval - Cc ) / 10
+```
+
+### GLMM MLE estimation
+
+```{r, eval = F}
+exp4mle <- glmer(k/n ~ isic*condition + (isic*condition|id),
+                 weights = n, family=binomial(link=logit), 
+                 data=exp4)
+```
+
+```{r}
+summary(exp4mle)
+```
+
+```{r newstuff}
+table(exp4$id)
+```
+
+### GLMM Bayes estimation
+
+```{r, eval = F}
+exp4b <- brm(k | trials(n) ~ isic*condition + (isic*condition|id),
+             family=binomial(link=logit), prior = Priors,
+             data=exp4, cores = 4, iter = iters, warmup = warmups)
+```
+
+```{r, echo=F}
+Pars <- parnames(exp4b)[1:4]
+print(exp4b$fit, pars = Pars, probs = c(0.025, 0.975), digits=3)
+```
+
+```{r}
+# Posterior probability (one-sided p-value)
+mean(posterior_samples(exp4b, pars = "b_cond") > 0) * 100
+```
+
+```{r, echo=F}
+post <- posterior_samples(exp4b, pars = "b")
+exp4pse <- tibble(
+    `No Warning` = get_pse(post, 0, Cc, 10),
+    Warning = get_pse(post, 1, Cc, 10)) %>%
+    mutate(Difference = Warning - `No Warning`) %>%
+    gather()
+exp4psesum <- group_by(exp4pse, key) %>%
+    summarise(m = mean(value),
+              lwr = quantile(value, probs=.025),
+              upr = quantile(value, probs=.975))
+group_by(exp4pse, key) %>%
+    summarize(pp = mean(value > 0))
+exp4psesum
+exp4psesum$key <- factor(exp4psesum$key, 
+                         levels = c("Warning", "No Warning", "Difference"))
+```
+
+### Plot results
+
+```{r, message=F, echo=F}
+e4p3 <- expand.grid(
+    isic = seq(min(exp4$isic), max(exp4$isic), length = 32),
+    n = 1,
+    condition = c("warning", "no_warning")) %>%
+    bind_cols(., fitted(exp4b, 
+                        newdata = ., 
+                        re_formula=NA, 
+                        scale = "response") %>%
+                  as_tibble()
+              ) %>%
+    mutate(interval = 10*isic + Cc) %>%
+    as_tibble() %>%
+    ggplot(aes(x=interval)) +
+    scale_color_manual(values = color_vals) +
+    scale_fill_manual(values = color_vals) +
+    geom_ribbon(aes(ymin=`2.5%ile`, 
+                    ymax=`97.5%ile`, 
+                    fill=factor(condition)),
+                alpha=alphas, col=NA) +
+    geom_line(aes(y=Estimate, col=factor(condition), lty=factor(condition)),
+              size=1.35) +
+    scale_x_continuous(breaks = sort(unique(exp4$interval)),
+                       expand = c(0, 0.001)) +
+    scale_y_continuous(breaks = c(0, .25, .5, .75, 1),
+                       labels = c("0", ".25", ".5", ".75", "1"),
+                       limits = c(0, 1), expand = c(0, 0.001)) +
+    labs(x="Inter-stimulus interval (ms)", y="Pr(element motion)") 
+```
+
+```{r, echo=F}
+e4p4 <- ggplot(exp4psesum, aes(x=key, m)) +
+    geom_hline(yintercept = 0, lty=2) +
+    geom_point(size=2) +
+    geom_errorbar(aes(ymin=lwr, ymax=upr), width = .2, size=.5) +
+    scale_y_continuous("PSE (ms)", 
+                       breaks = c(0, 15, 30, 45, 60),
+                       limits = c(-10, 70)) +
+    scale_x_discrete("Condition")
+```
+
+```{r, echo=F}
+e4p5 <- grid.arrange(
+    e4p3 + 
+        ggtitle("A)") +
+        theme(plot.margin = unit(c(3,2,3,3), "mm"),
+              title = element_text(vjust=-.2, hjust=-.1),
+              axis.title = element_text(vjust=0.5, hjust=.5)),
+    e4p4 + 
+        ggtitle("B)") +
+        theme(plot.margin = unit(c(3,3,3,2), "mm"),
+              title = element_text(vjust=-.2, hjust=-.15),
+              axis.title = element_text(hjust=.5)),
+    widths = c(.65, .35))
+```
+
+
+```{r, echo=F}
+bind_cols(exp4, as_tibble(fitted(exp4b))) %>%
+    ggplot(aes(x=interval, y=k/n, fill=condition)) +
+    scale_color_manual(values = color_vals) +
+    geom_point(aes(col=condition)) +
+    geom_ribbon(aes(ymin=`2.5%ile`/n, ymax=`97.5%ile`/n), alpha = .3) +
+    geom_line(aes(y=Estimate/n, col=condition)) +
+    facet_wrap("id")
+```
+
+# Combined analysis
+
+We also compared the effect of condition across the Ternus experiments using an interaction term. That is, is the effect of condition greater in experiments 2 and 3, than in experiment 4?
+
+```{r}
+( fulldata <- illusion %>% filter(exp > 1, !exclude) )
+fulldata$isic <- ( fulldata$interval - Cc ) / 10
+```
+
+## GLMM MLE Estimation
+
+```{r}
+fullmle <- glmer(k/n ~ isic*cond + exp*isic + exp*cond +
+                     (isic*cond|id),
+                 weights=n, family=binomial(link=logit), 
+                 data=fulldata)
+```
+
+```{r}
+summary(fullmle)
+```
+
+## GLMM Bayes estimation
+
+```{r, eval = F}
+fullb <- brm(k | trials(n) ~ isic*cond + exp*isic + exp*cond +
+                 (isic*cond|id),
+             family=binomial(link=logit), prior = Priors,
+             data=fulldata, cores = 4, iter = iters, warmup = warmups, 
+             save_ranef = FALSE)  # Save space
+
+```
+
+```{r, echo=F}
+Pars <- parnames(fullb)[1:10]
+summary(fullb, pars = Pars)
+```
+
+Posterior probability that effect of condition (i.e. warning condition effect is smaller than voluntary action condition effect).
+
+```{r}
+# Posterior probability (one-sided p-value)
+mean(posterior_samples(fullb, pars = "b_cond:exp4") < 0) * 100
+```
+
+Compare effect of condition across the three Ternus experiments:
+
+```{r}
+x <- as.data.frame(fullb, pars = "b_cond") %>% 
+    as_tibble() %>% 
+    transmute(cond_exp2 = b_cond,
+              cond_exp3 = b_cond + b_cond.exp3,
+              cond_exp4 = b_cond + b_cond.exp4,
+              cond_2v3 = b_cond.exp3,
+              cond_2v4 = b_cond.exp4,
+              cond_3v4 = cond_exp4 - cond_exp3)
+x %>% 
+    gather() %>% 
+    group_by(key) %>% 
+    summarize(bhat = mean(value),
+              `2.5%ile` = quantile(value, probs = 0.025),
+              `97.5%ile` = quantile(value, probs = 0.975))
+```
+
+
+```{r, echo = F, eval = F}
+# Save models in a file
+save(exp1b, exp2b, exp3b, exp4b, fullb, ieb,
+     exp1mle, exp2mle, exp3mle, exp4mle, fullmle, iemle,
+     file="~$models.rda", compress = "bzip2")
+```
+
+
+
+
+```{r, echo=F, eval=F}
+# Create PDFs of plots
+# Don't evaluate with knit--crashes
+pdf(file = "exp1combo.pdf", width = 7, height = 5)
+plot(e1p5)
+dev.off()
+
+pdf(file = "exp1ie.pdf", width = 7, height = 5)
+plot(e1bp7)
+dev.off()
+
+pdf(file = "exp2combo.pdf", width = 7, height = 5)
+plot(e2p5)
+dev.off()
+
+pdf(file = "exp3combo.pdf", width = 7, height = 5)
+plot(e3p5)
+dev.off()
+
+pdf(file = "exp4combo.pdf", width = 7, height = 5)
+plot(e4p5)
+dev.off()
+```
